@@ -12,14 +12,6 @@ final class FramedRangeInputStream extends InputStream {
 
     private static final int READ_BUFFER_SIZE = 8192;
 
-    private enum BoundaryShape {
-        NONE,
-        LEADING,
-        TRAILING,
-        LEADING_AND_TRAILING,
-        WHOLE
-    }
-
     private final InputStream source;
     private final long fromInclusive;
     private final long toExclusive;
@@ -30,17 +22,14 @@ final class FramedRangeInputStream extends InputStream {
     private final List<ByteFragments> boundaryFragments = new ArrayList<>(2);
 
     private FragmentAccumulator current = new FragmentAccumulator();
-    private FragmentSequenceInputStream exposedRecord;
     private int readOffset;
     private int readLimit;
     private long sourceBytesRead;
     private boolean prepared;
     private boolean sourceEnded;
+    private boolean recordExposed;
     private boolean finalRecordExposed;
     private boolean finished;
-    private boolean leadingBoundary;
-    private boolean trailingBoundary;
-    private boolean wholeBoundary;
 
     FramedRangeInputStream(
             InputStream source,
@@ -63,24 +52,24 @@ final class FramedRangeInputStream extends InputStream {
             prepared = true;
             if (!firstRange) {
                 if (!readThroughDelimiter()) {
-                    retainWholeBoundary();
+                    if (!current.isEmpty()) {
+                        boundaryFragments.add(current.toFragments());
+                    }
                     finished = true;
                     return false;
                 }
                 boundaryFragments.add(current.toFragments());
-                leadingBoundary = true;
                 current = new FragmentAccumulator();
             }
             loadNextRecord();
         }
-        return exposedRecord != null;
+        return recordExposed;
     }
 
     List<ByteFragments> boundaryFragments() {
         if (!finished) {
             throw new IllegalStateException("framed range has not been consumed to completion");
         }
-        boundaryShape();
         return Collections.unmodifiableList(new ArrayList<>(boundaryFragments));
     }
 
@@ -90,7 +79,7 @@ final class FramedRangeInputStream extends InputStream {
             return -1;
         }
 
-        int value = exposedRecord.read();
+        int value = current.read();
         if (value >= 0) {
             return value;
         }
@@ -111,7 +100,7 @@ final class FramedRangeInputStream extends InputStream {
             return -1;
         }
 
-        int read = exposedRecord.read(bytes, offset, length);
+        int read = current.read(bytes, offset, length);
         if (read >= 0) {
             return read;
         }
@@ -128,14 +117,14 @@ final class FramedRangeInputStream extends InputStream {
         if (!prepared) {
             prepare();
         }
-        while (exposedRecord == null && !finished) {
+        while (!recordExposed && !finished) {
             loadNextRecord();
         }
-        return exposedRecord != null;
+        return recordExposed;
     }
 
     private void finishExposedRecord() throws IOException {
-        exposedRecord = null;
+        recordExposed = false;
         current.clear();
         if (finalRecordExposed) {
             finalRecordExposed = false;
@@ -146,7 +135,7 @@ final class FramedRangeInputStream extends InputStream {
     }
 
     private void loadNextRecord() throws IOException {
-        if (finished || exposedRecord != null) {
+        if (finished || recordExposed) {
             return;
         }
 
@@ -161,16 +150,14 @@ final class FramedRangeInputStream extends InputStream {
         } else {
             if (!lastRange && !current.isEmpty()) {
                 boundaryFragments.add(current.toFragments());
-                trailingBoundary = true;
             }
             finished = true;
         }
     }
 
     private void exposeCurrentRecord() {
-        exposedRecord = new FragmentSequenceInputStream(
-                Collections.singletonList(current.toFragments())
-        );
+        current.beginReading();
+        recordExposed = true;
     }
 
     private boolean readThroughDelimiter() throws IOException {
@@ -245,26 +232,4 @@ final class FramedRangeInputStream extends InputStream {
         return true;
     }
 
-    private void retainWholeBoundary() {
-        if (!current.isEmpty()) {
-            boundaryFragments.add(current.toFragments());
-            wholeBoundary = true;
-        }
-    }
-
-    private BoundaryShape boundaryShape() {
-        if (wholeBoundary) {
-            return BoundaryShape.WHOLE;
-        }
-        if (leadingBoundary && trailingBoundary) {
-            return BoundaryShape.LEADING_AND_TRAILING;
-        }
-        if (leadingBoundary) {
-            return BoundaryShape.LEADING;
-        }
-        if (trailingBoundary) {
-            return BoundaryShape.TRAILING;
-        }
-        return BoundaryShape.NONE;
-    }
 }

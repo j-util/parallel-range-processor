@@ -3,8 +3,9 @@
 [![CI](https://github.com/j-util/parallel-range-processor/actions/workflows/ci.yml/badge.svg)](https://github.com/j-util/parallel-range-processor/actions/workflows/ci.yml)
 
 A small Java 8 library for concurrently processing delimiter-framed records
-from one large, range-addressable byte source without materializing the complete
-source. It is an orchestration layer over
+from one large, range-addressable byte source while normally retaining only
+reusable framing buffers and range-boundary fragments. It is an orchestration
+layer over
 [`inputstream-processor-core`](https://github.com/j-util/inputstream-processor-core),
 which remains responsible for parsing and consumer-call counting.
 
@@ -59,8 +60,16 @@ For source size `S` and requested parallelism `N`, the processor creates up to
 overlap, workers never read outside their assigned ranges, and there is one
 top-level task per actual range—not one task per record.
 
-Within a worker, a segmented framing stream buffers the current record only
-until it encounters the configured delimiter. It:
+If division produces exactly one actual range, the processor opens `[0, S)` and
+submits one direct `InputStreamProcessor` task. Delimiter framing, fragment
+retention, and boundary reconstruction are bypassed because no range boundary
+exists.
+
+Within a multi-range worker, a segmented framing stream copies the current
+record into reusable accumulator storage until it encounters the configured
+delimiter. Complete records are read directly from that reusable state;
+persistent fragment snapshots are created only for retained boundaries. The
+framing stream:
 
 1. retains an ambiguous leading fragment for every range except the first;
 2. exposes complete delimiter-terminated records to that worker's independent
@@ -73,16 +82,15 @@ An intermediate range with no delimiter is represented as one middle fragment,
 not inferred from parser results or consumer-call counts. This is what permits a
 single record to span three, four, or more ranges. After all workers complete,
 only boundary fragments are concatenated in source/range order and processed by
-one additional core parser. Fragments are streamed from fixed-size segments;
-the reconstructed record is not first copied into one giant contiguous
-`byte[]`.
+one additional core parser in one final task submitted to the caller-owned
+executor. Fragments are streamed from fixed-size segments; the reconstructed
+record is not first copied into one giant contiguous `byte[]`.
 
 Complete records are processed during the parallel phase and are not retained
-after the parser consumes them. The library performs no complete-source
-materialization. Temporary memory is proportional to reusable per-worker
-record-framing buffers plus retained boundary fragments. Very large records can
-therefore require temporary storage proportional to their size; the library
-does not claim zero materialization.
+after the parser consumes them. Temporary memory is proportional to reusable
+per-worker framing buffers plus retained boundary-spanning record data. In the
+pathological case where one logical record spans essentially the entire source,
+the retained boundary data can approach the source size.
 
 ## Local-file example
 
@@ -142,6 +150,13 @@ and must consume its supplied complete-record stream through EOF. A parser that
 returns while complete record bytes remain causes processing to fail rather
 than silently losing records.
 
+Every worker parser receives an independent subsequence of complete records,
+not a replay of the source beginning. A parser therefore cannot independently
+discover stream-global initialization such as a CSV header, preamble, schema,
+or other first-record metadata in every worker. Configure such metadata
+externally, share it immutably among parser instances, or handle its discovery
+outside this V1 orchestration model.
+
 ## Concurrency and ordering
 
 - The caller supplies explicit parallelism and an `Executor`. Parallelism is
@@ -154,7 +169,8 @@ than silently losing records.
 - Global consumer invocation order is unspecified. Complete in-range records
   can be consumed in any worker completion order.
 - Boundary reconstruction order is deterministic source order. Reconstructed
-  records are consumed only after the parallel worker phase.
+  records are consumed only after the parallel worker phase, in one final task
+  submitted to the same executor.
 - A request for parallelism greater than the byte size creates fewer ranges;
   zero-length worker ranges are never submitted.
 
@@ -208,14 +224,20 @@ and the final boundary stream. It counts parser-emitted items whose consumer
 calls returned normally; it is never used to infer record framing.
 
 Source, parser, consumer, and executor failures do not disappear. Submitted
-workers are awaited before `process` returns or throws, so no worker is left
+tasks are awaited before `process` returns or throws, so no worker is left
 calling the consumer after the operation has reported completion. A generic
 `Executor` has no reliable cancellation API, so already submitted tasks are
 allowed to finish. If several workers fail, the original failure from the
 lowest source-range ordinal is propagated regardless of completion order.
 
+The final boundary task is submitted only after every range worker completes
+normally. A final parser-factory or executor-submission failure is propagated
+unchanged; rejected boundary work is not run. Once the final task is accepted,
+its parser or consumer failure is propagated unchanged after that task finishes.
+
 If the waiting thread is interrupted, the processor still waits for submitted
-workers and then throws `InterruptedException`; a worker failure is attached as
-a suppressed exception. Completed consumer side effects are not rolled back,
-and no transactional guarantee is made. No result is returned after any
-failure.
+tasks and then throws `InterruptedException`; a selected task failure is
+attached as a suppressed exception. An interruption during the range phase
+prevents final-boundary submission. Completed consumer side effects are not
+rolled back, and no transactional guarantee is made. No result is returned
+after any failure.

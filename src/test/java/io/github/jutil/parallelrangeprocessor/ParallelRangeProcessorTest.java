@@ -2,6 +2,7 @@ package io.github.jutil.parallelrangeprocessor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,6 +32,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Test;
@@ -152,6 +154,27 @@ class ParallelRangeProcessorTest {
     }
 
     @Test
+    void multiSegmentOrdinaryRecordIsReadFromReusableFramingState() throws Exception {
+        String ordinary = repeated('x', 9000);
+        String boundary = repeated('z', 10000);
+        List<String> consumed = synchronizedList();
+        ParallelRangeProcessor<String> processor = new ParallelRangeProcessor<>(
+                2,
+                DIRECT_EXECUTOR,
+                () -> byteDelimiterParser((byte) '|'),
+                RecordDelimiter.singleByte((byte) '|')
+        );
+
+        ParallelProcessingResult result = processor.process(
+                source(ordinary + '|' + boundary),
+                consumed::add
+        );
+
+        assertEquals(2L, result.getProcessedCount());
+        assertSameElements(Arrays.asList(ordinary, boundary), consumed);
+    }
+
+    @Test
     void sourceSmallerThanParallelismCreatesNoZeroLengthRanges() throws Exception {
         ByteArrayRangeSource source = source("a\n");
         List<String> consumed = synchronizedList();
@@ -168,8 +191,65 @@ class ParallelRangeProcessorTest {
     }
 
     @Test
-    void parallelismOneProcessesTheOriginalStreamDirectly() throws Exception {
-        assertRecords("a\nb\nc", 1, "a", "b", "c");
+    void parallelismOneBypassesFramingAndUsesTheSuppliedExecutor() throws Exception {
+        ByteArrayRangeSource source = source("a\nb\nc");
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        AtomicInteger submissions = new AtomicInteger();
+        AtomicReference<Thread> parserThread = new AtomicReference<>();
+        Thread callingThread = Thread.currentThread();
+        List<String> consumed = new ArrayList<>();
+        ParallelRangeProcessor<String> processor = new ParallelRangeProcessor<>(
+                1,
+                command -> {
+                    submissions.incrementAndGet();
+                    executor.execute(command);
+                },
+                () -> (input, emitter) -> {
+                    assertFalse(input instanceof FramedRangeInputStream);
+                    parserThread.set(Thread.currentThread());
+                    lineParser().parse(input, emitter);
+                },
+                RecordDelimiter.newline()
+        );
+
+        try {
+            ParallelProcessingResult result = processor.process(source, consumed::add);
+
+            assertEquals(3L, result.getProcessedCount());
+            assertEquals(Arrays.asList("a", "b", "c"), consumed);
+            assertEquals(1, submissions.get());
+            assertNotSame(callingThread, parserThread.get());
+            assertEquals(Collections.singletonList(new RangeCall(0, 5)), source.openedRanges());
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void sourceSizeCanReduceRangeDivisionToTheSingleRangeFastPath() throws Exception {
+        AtomicInteger submissions = new AtomicInteger();
+        AtomicBoolean framingObserved = new AtomicBoolean();
+        List<String> consumed = new ArrayList<>();
+        ParallelRangeProcessor<String> processor = new ParallelRangeProcessor<>(
+                8,
+                command -> {
+                    submissions.incrementAndGet();
+                    command.run();
+                },
+                () -> (input, emitter) -> {
+                    framingObserved.set(input instanceof FramedRangeInputStream);
+                    lineParser().parse(input, emitter);
+                },
+                RecordDelimiter.newline()
+        );
+
+        ParallelProcessingResult result = processor.process(source("x"), consumed::add);
+
+        assertEquals(1L, result.getProcessedCount());
+        assertEquals(Collections.singletonList("x"), consumed);
+        assertEquals(1, submissions.get());
+        assertFalse(framingObserved.get());
     }
 
     @Test
@@ -413,6 +493,37 @@ class ParallelRangeProcessorTest {
                 ),
                 source.openedRanges()
         );
+    }
+
+    @Test
+    void reconstructedBoundariesRunAsOneFinalExecutorTask() throws Exception {
+        ExecutorService workerThread = Executors.newSingleThreadExecutor();
+        AtomicInteger submissions = new AtomicInteger();
+        AtomicReference<Thread> consumerThread = new AtomicReference<>();
+        Thread callingThread = Thread.currentThread();
+        List<String> consumed = new ArrayList<>();
+        Executor executor = command -> {
+            submissions.incrementAndGet();
+            workerThread.execute(command);
+        };
+
+        try {
+            ParallelProcessingResult result = processor(4, executor).process(
+                    source("abcdefgh"),
+                    item -> {
+                        consumerThread.set(Thread.currentThread());
+                        consumed.add(item);
+                    }
+            );
+
+            assertEquals(1L, result.getProcessedCount());
+            assertEquals(Collections.singletonList("abcdefgh"), consumed);
+            assertEquals(5, submissions.get());
+            assertNotSame(callingThread, consumerThread.get());
+        } finally {
+            workerThread.shutdownNow();
+            assertTrue(workerThread.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     @Test
@@ -660,6 +771,48 @@ class ParallelRangeProcessorTest {
     }
 
     @Test
+    void finalBoundarySubmissionFailurePropagatesUnchanged() {
+        RejectedExecutionException failure = new RejectedExecutionException("final rejected");
+        AtomicInteger submissions = new AtomicInteger();
+        Executor executor = command -> {
+            if (submissions.incrementAndGet() == 5) {
+                throw failure;
+            }
+            command.run();
+        };
+        List<String> consumed = new ArrayList<>();
+
+        RejectedExecutionException thrown = assertThrows(
+                RejectedExecutionException.class,
+                () -> processor(4, executor).process(source("abcdefgh"), consumed::add)
+        );
+
+        assertSame(failure, thrown);
+        assertEquals(5, submissions.get());
+        assertTrue(consumed.isEmpty());
+    }
+
+    @Test
+    void finalBoundaryConsumerFailurePropagatesUnchanged() {
+        RuntimeException failure = new IllegalStateException("final consumer failed");
+        AtomicInteger submissions = new AtomicInteger();
+        Executor executor = command -> {
+            submissions.incrementAndGet();
+            command.run();
+        };
+
+        RuntimeException thrown = assertThrows(
+                RuntimeException.class,
+                () -> processor(4, executor).process(source("abcdefgh"), item -> {
+                    throw failure;
+                })
+        );
+
+        assertSame(failure, thrown);
+        assertEquals(5, submissions.get());
+    }
+
+    @Test
     void workerFailureWaitsForEveryOtherSubmittedWorkerToFinish() throws Exception {
         IOException failure = new IOException("first range failed");
         CountDownLatch secondWorkerEntered = new CountDownLatch(1);
@@ -728,6 +881,64 @@ class ParallelRangeProcessorTest {
             caller.shutdownNow();
             assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
             assertTrue(caller.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void interruptionWhileAwaitingWorkersStillAwaitsEveryConsumerCall() throws Exception {
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        CountDownLatch consumersEntered = new CountDownLatch(2);
+        CountDownLatch releaseConsumers = new CountDownLatch(1);
+        CountDownLatch consumersExited = new CountDownLatch(2);
+        CountDownLatch processReturned = new CountDownLatch(1);
+        AtomicInteger activeConsumers = new AtomicInteger();
+        AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
+        ParallelRangeProcessor<String> processor = processor(2, workers);
+        Thread caller = new Thread(() -> {
+            try {
+                processor.process(source("a\nb\nc\n"), item -> {
+                    activeConsumers.incrementAndGet();
+                    consumersEntered.countDown();
+                    try {
+                        if (!releaseConsumers.await(5, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("timed out awaiting consumer release");
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(interrupted);
+                    } finally {
+                        activeConsumers.decrementAndGet();
+                        consumersExited.countDown();
+                    }
+                });
+                terminalFailure.set(new AssertionError("process completed normally"));
+            } catch (Throwable failure) {
+                terminalFailure.set(failure);
+            } finally {
+                processReturned.countDown();
+            }
+        }, "parallel-range-process-caller");
+
+        try {
+            caller.start();
+            assertTrue(consumersEntered.await(5, TimeUnit.SECONDS));
+
+            caller.interrupt();
+            assertFalse(processReturned.await(100, TimeUnit.MILLISECONDS));
+
+            releaseConsumers.countDown();
+            assertTrue(consumersExited.await(5, TimeUnit.SECONDS));
+            assertTrue(processReturned.await(5, TimeUnit.SECONDS));
+            caller.join(5000L);
+
+            assertTrue(terminalFailure.get() instanceof InterruptedException);
+            assertEquals(0, activeConsumers.get());
+        } finally {
+            releaseConsumers.countDown();
+            caller.interrupt();
+            caller.join(5000L);
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
         }
     }
 
@@ -949,6 +1160,7 @@ class ParallelRangeProcessorTest {
 
         private final int expectedTasks;
         private final List<Runnable> tasks = new ArrayList<>();
+        private boolean batchExecuted;
 
         private ReverseBatchExecutor(int expectedTasks) {
             this.expectedTasks = expectedTasks;
@@ -956,11 +1168,17 @@ class ParallelRangeProcessorTest {
 
         @Override
         public synchronized void execute(Runnable command) {
+            if (batchExecuted) {
+                command.run();
+                return;
+            }
             tasks.add(command);
             if (tasks.size() == expectedTasks) {
+                batchExecuted = true;
                 for (int index = tasks.size() - 1; index >= 0; index--) {
                     tasks.get(index).run();
                 }
+                tasks.clear();
             }
         }
     }

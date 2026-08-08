@@ -11,6 +11,9 @@ final class FragmentAccumulator {
     private int usedSegments;
     private int writeOffset;
     private long size;
+    private int readSegmentIndex;
+    private int readOffset;
+    private long readRemaining;
 
     void append(byte[] source, int offset, int length) {
         if (length == 0) {
@@ -34,21 +37,67 @@ final class FragmentAccumulator {
         usedSegments = 0;
         writeOffset = 0;
         size = 0L;
+        readSegmentIndex = 0;
+        readOffset = 0;
+        readRemaining = 0L;
     }
 
     boolean isEmpty() {
         return size == 0L;
     }
 
-    ByteFragments toFragments() {
-        if (size == 0L) {
-            return ByteFragments.empty();
+    void beginReading() {
+        readSegmentIndex = 0;
+        readOffset = 0;
+        readRemaining = size;
+    }
+
+    int read() {
+        if (readRemaining == 0L) {
+            return -1;
         }
+
+        byte[] segment = segments.get(readSegmentIndex);
+        int value = segment[readOffset] & 0xff;
+        advanceRead(1);
+        return value;
+    }
+
+    int read(byte[] destination, int offset, int length) {
+        if (readRemaining == 0L) {
+            return -1;
+        }
+
+        int total = 0;
+        while (total < length && readRemaining > 0L) {
+            byte[] segment = segments.get(readSegmentIndex);
+            int available = segment.length - readOffset;
+            int copied = (int) Math.min(
+                    (long) Math.min(length - total, available),
+                    readRemaining
+            );
+            System.arraycopy(segment, readOffset, destination, offset + total, copied);
+            advanceRead(copied);
+            total += copied;
+        }
+        return total;
+    }
+
+    ByteFragments toFragments() {
         byte[][] retained = new byte[usedSegments][];
         for (int index = 0; index < usedSegments; index++) {
             retained[index] = segments.get(index);
         }
         return new ByteFragments(retained, size);
+    }
+
+    private void advanceRead(int count) {
+        readOffset += count;
+        readRemaining -= count;
+        if (readRemaining > 0L && readOffset == SEGMENT_SIZE) {
+            readSegmentIndex++;
+            readOffset = 0;
+        }
     }
 
     private byte[] writableSegment() {

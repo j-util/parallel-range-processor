@@ -1,5 +1,6 @@
 package io.github.jutil.parallelrangeprocessor;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Objects;
@@ -24,9 +25,10 @@ final class BoundedInputStream extends InputStream {
         }
 
         int value = delegate.read();
-        if (value >= 0) {
-            remaining--;
+        if (value < 0) {
+            throw prematureEnd();
         }
+        remaining--;
         return value;
     }
 
@@ -45,6 +47,9 @@ final class BoundedInputStream extends InputStream {
 
         int requested = (int) Math.min((long) length, remaining);
         int read = delegate.read(bytes, offset, requested);
+        if (read < 0) {
+            throw prematureEnd();
+        }
         if (read > 0) {
             remaining -= read;
         }
@@ -71,5 +76,12 @@ final class BoundedInputStream extends InputStream {
     @Override
     public void close() throws IOException {
         delegate.close();
+    }
+
+    private EOFException prematureEnd() {
+        return new EOFException(
+                "RangeSource ended before its assigned range was complete; "
+                        + remaining + " bytes remain"
+        );
     }
 }
