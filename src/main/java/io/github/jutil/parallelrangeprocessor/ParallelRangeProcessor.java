@@ -66,13 +66,17 @@ import java.util.function.Supplier;
  */
 public final class ParallelRangeProcessor<T> {
 
+    private static final int DEFAULT_READ_BUFFER_SIZE = 64 * 1024;
+
     private final int parallelism;
     private final Executor executor;
     private final Supplier<? extends InputParser<T>> parserFactory;
     private final RecordDelimiter delimiter;
+    private final int readBufferSize;
 
     /**
-     * Creates a processor with explicit concurrency and framing configuration.
+     * Creates a processor with explicit concurrency and framing configuration,
+     * using a 64 KiB framing read buffer for each worker.
      *
      * <p>The parser factory is invoked once per actual non-empty range before
      * worker submission and once more after the worker phase if reconstructed
@@ -99,13 +103,62 @@ public final class ParallelRangeProcessor<T> {
             Supplier<? extends InputParser<T>> parserFactory,
             RecordDelimiter delimiter
     ) {
+        this(
+                parallelism,
+                executor,
+                parserFactory,
+                delimiter,
+                DEFAULT_READ_BUFFER_SIZE
+        );
+    }
+
+    /**
+     * Creates a processor with explicit concurrency and framing configuration.
+     *
+     * <p>The parser factory is invoked once per actual non-empty range before
+     * worker submission and once more after the worker phase if reconstructed
+     * boundary data exists. Each invocation must return a non-null parser that
+     * is independently usable from parsers returned by other invocations. Range
+     * parsers receive independent subsequences of complete records; they cannot
+     * each discover stream-global metadata such as a header, preamble, or schema
+     * from the source's first record. Such metadata must be supplied externally
+     * or shared immutably. Each parser must consume its supplied stream through
+     * end-of-stream before returning; returning while complete record bytes
+     * remain is treated as a parser contract failure.</p>
+     *
+     * <p>Each worker has its own framing read buffer of {@code readBufferSize}
+     * bytes. This setting does not change the fixed-size segmentation used for
+     * retained boundary fragments.</p>
+     *
+     * @param parallelism the maximum number of source ranges and worker tasks
+     * @param executor the caller-owned executor used to run range and final
+     *        boundary tasks
+     * @param parserFactory factory for independent core parser instances
+     * @param delimiter the single-byte record framing delimiter
+     * @param readBufferSize the positive per-worker framing read-buffer size in
+     *        bytes
+     * @throws IllegalArgumentException if {@code parallelism} or
+     *         {@code readBufferSize} is not positive
+     * @throws NullPointerException if any other argument is {@code null}
+     */
+    public ParallelRangeProcessor(
+            int parallelism,
+            Executor executor,
+            Supplier<? extends InputParser<T>> parserFactory,
+            RecordDelimiter delimiter,
+            int readBufferSize
+    ) {
         if (parallelism <= 0) {
             throw new IllegalArgumentException("parallelism must be positive");
+        }
+        if (readBufferSize <= 0) {
+            throw new IllegalArgumentException("readBufferSize must be positive");
         }
         this.parallelism = parallelism;
         this.executor = Objects.requireNonNull(executor, "executor");
         this.parserFactory = Objects.requireNonNull(parserFactory, "parserFactory");
         this.delimiter = Objects.requireNonNull(delimiter, "delimiter");
+        this.readBufferSize = readBufferSize;
     }
 
     /**
@@ -272,7 +325,8 @@ public final class ParallelRangeProcessor<T> {
                     range.toExclusive,
                     range.first,
                     range.last,
-                    delimiter.value()
+                    delimiter.value(),
+                    readBufferSize
             )) {
                 if (input.prepare()) {
                     count = processor.process(input, consumer).getProcessedCount();

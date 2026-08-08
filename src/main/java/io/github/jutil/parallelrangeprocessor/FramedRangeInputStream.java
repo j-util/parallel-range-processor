@@ -10,15 +10,13 @@ import java.util.Objects;
 
 final class FramedRangeInputStream extends InputStream {
 
-    private static final int READ_BUFFER_SIZE = 8192;
-
     private final InputStream source;
     private final long fromInclusive;
     private final long toExclusive;
     private final boolean firstRange;
     private final boolean lastRange;
     private final byte delimiter;
-    private final byte[] readBuffer = new byte[READ_BUFFER_SIZE];
+    private final byte[] readBuffer;
     private final List<ByteFragments> boundaryFragments = new ArrayList<>(2);
 
     private FragmentAccumulator current = new FragmentAccumulator();
@@ -37,7 +35,8 @@ final class FramedRangeInputStream extends InputStream {
             long toExclusive,
             boolean firstRange,
             boolean lastRange,
-            byte delimiter
+            byte delimiter,
+            int readBufferSize
     ) {
         this.source = Objects.requireNonNull(source, "source");
         this.fromInclusive = fromInclusive;
@@ -45,6 +44,7 @@ final class FramedRangeInputStream extends InputStream {
         this.firstRange = firstRange;
         this.lastRange = lastRange;
         this.delimiter = delimiter;
+        this.readBuffer = new byte[readBufferSize];
     }
 
     boolean prepare() throws IOException {

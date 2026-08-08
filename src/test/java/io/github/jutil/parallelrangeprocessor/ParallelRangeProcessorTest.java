@@ -154,6 +154,39 @@ class ParallelRangeProcessorTest {
     }
 
     @Test
+    void defaultConstructorUsesIndependent64KiBWorkerReadBuffers() throws Exception {
+        ReadBufferRecordingRangeSource source = new ReadBufferRecordingRangeSource(
+                bytes(repeated('x', 2 * 64 * 1024 + 2))
+        );
+
+        processor(2, DIRECT_EXECUTOR).process(source, item -> {
+        });
+
+        assertEquals(Arrays.asList(64 * 1024, 64 * 1024), source.maximumReadSizes());
+        assertNotSame(source.workerBuffers().get(0), source.workerBuffers().get(1));
+    }
+
+    @Test
+    void customConstructorUsesConfiguredIndependentWorkerReadBuffers() throws Exception {
+        ReadBufferRecordingRangeSource source = new ReadBufferRecordingRangeSource(
+                bytes("abcdefghij")
+        );
+        ParallelRangeProcessor<String> processor = new ParallelRangeProcessor<>(
+                2,
+                DIRECT_EXECUTOR,
+                ParallelRangeProcessorTest::lineParser,
+                RecordDelimiter.newline(),
+                3
+        );
+
+        processor.process(source, item -> {
+        });
+
+        assertEquals(Arrays.asList(3, 3), source.maximumReadSizes());
+        assertNotSame(source.workerBuffers().get(0), source.workerBuffers().get(1));
+    }
+
+    @Test
     void multiSegmentOrdinaryRecordIsReadFromReusableFramingState() throws Exception {
         String ordinary = repeated('x', 9000);
         String boundary = repeated('z', 10000);
@@ -261,6 +294,30 @@ class ParallelRangeProcessorTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> processor(-1, DIRECT_EXECUTOR)
+        );
+    }
+
+    @Test
+    void nonPositiveReadBufferSizeIsRejected() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new ParallelRangeProcessor<String>(
+                        1,
+                        DIRECT_EXECUTOR,
+                        ParallelRangeProcessorTest::lineParser,
+                        RecordDelimiter.newline(),
+                        0
+                )
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new ParallelRangeProcessor<String>(
+                        1,
+                        DIRECT_EXECUTOR,
+                        ParallelRangeProcessorTest::lineParser,
+                        RecordDelimiter.newline(),
+                        -1
+                )
         );
     }
 
@@ -1089,6 +1146,60 @@ class ParallelRangeProcessorTest {
 
         private int closedStreamCount() {
             return closedStreams.get();
+        }
+    }
+
+    private static final class ReadBufferRecordingRangeSource implements RangeSource {
+
+        private final byte[] content;
+        private final List<byte[]> workerBuffers = new ArrayList<>();
+        private final List<Integer> maximumReadSizes = new ArrayList<>();
+
+        private ReadBufferRecordingRangeSource(byte[] content) {
+            this.content = content;
+        }
+
+        @Override
+        public long size() {
+            return content.length;
+        }
+
+        @Override
+        public InputStream openRange(long fromInclusive, long toExclusive) {
+            ByteArrayInputStream delegate = new ByteArrayInputStream(
+                    content,
+                    (int) fromInclusive,
+                    (int) (toExclusive - fromInclusive)
+            );
+            int workerIndex = maximumReadSizes.size();
+            maximumReadSizes.add(0);
+            workerBuffers.add(null);
+            return new InputStream() {
+                @Override
+                public int read() {
+                    return delegate.read();
+                }
+
+                @Override
+                public int read(byte[] bytes, int offset, int length) {
+                    if (workerBuffers.get(workerIndex) == null) {
+                        workerBuffers.set(workerIndex, bytes);
+                    }
+                    maximumReadSizes.set(
+                            workerIndex,
+                            Math.max(maximumReadSizes.get(workerIndex), length)
+                    );
+                    return delegate.read(bytes, offset, length);
+                }
+            };
+        }
+
+        private List<byte[]> workerBuffers() {
+            return workerBuffers;
+        }
+
+        private List<Integer> maximumReadSizes() {
+            return maximumReadSizes;
         }
     }
 

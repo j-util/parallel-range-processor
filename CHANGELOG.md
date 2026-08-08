@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - Ordered, segmented reconstruction of records crossing any number of ranges.
 - Integration with `inputstream-processor-core` 1.0.0.
 - Java 8 and Java 25 CI verification.
+- Configurable per-worker framing read-buffer size, with a 64 KiB default.
 
 ### Changed
 

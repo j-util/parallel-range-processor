@@ -92,6 +92,11 @@ per-worker framing buffers plus retained boundary-spanning record data. In the
 pathological case where one logical record spans essentially the entire source,
 the retained boundary data can approach the source size.
 
+Each multi-range worker uses its own 64 KiB framing read buffer by default. The
+five-argument `ParallelRangeProcessor` constructor accepts a positive
+`readBufferSize` when an application needs to tune that per-worker buffer;
+boundary-fragment segment sizing is independent of this setting.
+
 ## Local-file example
 
 ```java
