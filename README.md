@@ -21,8 +21,10 @@ Parallel Range Processor requires Java 8 or later.
 </dependency>
 ```
 
-The artifact has one compile-time dependency:
-`io.github.j-util:inputstream-processor-core:1.0.0`. There are no storage SDK or
+The artifact has one required runtime dependency:
+`io.github.j-util:inputstream-processor-core:1.0.0`. It is declared in the
+normal Maven compile scope, so Maven consumers receive it transitively on both
+their compile and runtime classpaths. There are no storage SDK or
 concurrency-framework dependencies.
 
 ## Why a range source is required
@@ -150,10 +152,12 @@ try {
 
 The parser factory is called once per actual range and, when boundary data
 exists, once for final reconstruction. Every returned parser must be non-null,
-independently usable, synchronous as required by `inputstream-processor-core`,
-and must consume its supplied complete-record stream through EOF. A parser that
-returns while complete record bytes remain causes processing to fail rather
-than silently losing records.
+independently usable from every other returned parser, synchronous as required
+by `inputstream-processor-core`, and must consume its supplied complete-record
+stream through EOF. Stateful parser instances must not be shared between
+factory invocations; the library neither checks parser identity nor
+synchronizes parser use. A parser that returns while complete record bytes
+remain causes processing to fail rather than silently losing records.
 
 Every worker parser receives an independent subsequence of complete records,
 not a replay of the source beginning. A parser therefore cannot independently
@@ -164,9 +168,23 @@ outside this V1 orchestration model.
 
 ## Concurrency and ordering
 
+- Concurrent `process(...)` calls on the same `ParallelRangeProcessor` instance
+  are supported. Per-call orchestration state is independent, but the configured
+  executor and parser factory are shared. The factory is called sequentially by
+  the calling thread during one processing operation, but it must tolerate
+  concurrent `get()` calls when the processor instance is used concurrently.
+  Any source or consumer reused across calls must also tolerate the resulting
+  concurrent use.
 - The caller supplies explicit parallelism and an `Executor`. Parallelism is
   never inferred from the executor.
 - The library creates no threads or pools and never shuts down the executor.
+- `process(...)` blocks while it waits for tasks submitted to the configured
+  executor. Calling it from a task running on that same bounded executor can
+  cause thread starvation or deadlock: a conventional single-thread executor
+  has no free thread to run the submitted work, and concurrent blocking calls
+  can exhaust a larger fixed pool. Call `process(...)` from outside that
+  executor, or otherwise ensure the executor always has capacity to run every
+  submitted task while callers are blocked.
 - The same consumer can be called concurrently by several worker threads. For
   effective parallelism greater than one, the consumer must be thread-safe or
   otherwise tolerate concurrent invocation. Calls are not synchronized by the

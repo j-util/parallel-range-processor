@@ -42,10 +42,24 @@ import java.util.function.Supplier;
  * Global consumer invocation order is unspecified. Only reconstruction of
  * retained boundary fragments is source-ordered.</p>
  *
+ * <p>Concurrent calls to {@link #process(RangeSource, Consumer)} on the same
+ * instance are supported. Per-call orchestration state is independent, but the
+ * configured executor and parser factory are shared. The parser factory is
+ * invoked sequentially by a calling thread within one processing operation,
+ * but it must tolerate concurrent invocations when this processor is used by
+ * multiple calling threads. Parsers returned by different factory invocations
+ * must be independently usable; the processor neither checks parser identity
+ * nor synchronizes parser use. Any source or consumer reused across processing
+ * calls must likewise tolerate the resulting concurrent use.</p>
+ *
  * <p>This class creates no threads, owns no thread pool, and never shuts down or
  * otherwise manages the supplied executor. Because the generic {@link Executor}
  * contract has no cancellation facility, all successfully submitted tasks are
- * allowed to finish and are awaited before this method returns or throws.
+ * allowed to finish and are awaited before this method returns or throws. This
+ * blocking wait can starve or deadlock a bounded executor if {@code process}
+ * itself is called from that executor and insufficient threads remain to run
+ * submitted tasks. In particular, a conventionally queueing single-thread
+ * executor cannot run a non-empty processing operation from its own worker.
  * If multiple workers fail, the failure belonging to the lowest source-range
  * ordinal is propagated, regardless of worker completion order.</p>
  *
@@ -82,8 +96,14 @@ public final class ParallelRangeProcessor<T> {
      * worker submission and once more after the worker phase if reconstructed
      * boundary data exists. Each invocation must return a non-null parser that
      * is independently usable from parsers returned by other invocations. Range
-     * parsers receive independent subsequences of complete records; they cannot
-     * each discover stream-global metadata such as a header, preamble, or schema
+     * parser instances may execute concurrently and are not synchronized by this
+     * class. The factory is invoked sequentially within one processing call, but
+     * must tolerate concurrent invocations if this processor is used
+     * concurrently.</p>
+     *
+     * <p>Range parsers receive independent subsequences of complete records;
+     * they cannot each discover stream-global metadata such as a header,
+     * preamble, or schema
      * from the source's first record. Such metadata must be supplied externally
      * or shared immutably. Each parser must consume its supplied stream through
      * end-of-stream before returning; returning while complete record bytes
@@ -119,8 +139,14 @@ public final class ParallelRangeProcessor<T> {
      * worker submission and once more after the worker phase if reconstructed
      * boundary data exists. Each invocation must return a non-null parser that
      * is independently usable from parsers returned by other invocations. Range
-     * parsers receive independent subsequences of complete records; they cannot
-     * each discover stream-global metadata such as a header, preamble, or schema
+     * parser instances may execute concurrently and are not synchronized by this
+     * class. The factory is invoked sequentially within one processing call, but
+     * must tolerate concurrent invocations if this processor is used
+     * concurrently.</p>
+     *
+     * <p>Range parsers receive independent subsequences of complete records;
+     * they cannot each discover stream-global metadata such as a header,
+     * preamble, or schema
      * from the source's first record. Such metadata must be supplied externally
      * or shared immutably. Each parser must consume its supplied stream through
      * end-of-stream before returning; returning while complete record bytes
