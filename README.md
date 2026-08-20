@@ -1,5 +1,7 @@
 # Parallel Range Processor
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.j-util/parallel-range-processor)](https://central.sonatype.com/artifact/io.github.j-util/parallel-range-processor)
+[![Javadoc](https://javadoc.io/badge2/io.github.j-util/parallel-range-processor/javadoc.svg)](https://javadoc.io/doc/io.github.j-util/parallel-range-processor)
 [![CI](https://github.com/j-util/parallel-range-processor/actions/workflows/ci.yml/badge.svg)](https://github.com/j-util/parallel-range-processor/actions/workflows/ci.yml)
 
 A small Java 8 library for concurrently processing delimiter-framed records
@@ -12,6 +14,9 @@ which remains responsible for parsing and consumer-call counting.
 ## Requirements and installation
 
 Parallel Range Processor requires Java 8 or later.
+
+The published artifact is available on
+[Maven Central](https://central.sonatype.com/artifact/io.github.j-util/parallel-range-processor).
 
 ```xml
 <dependency>
